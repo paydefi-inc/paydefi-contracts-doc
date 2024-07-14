@@ -18,12 +18,12 @@ Paydefi Payment Protocol deployed contract addresses:
 
 | Chain     |  Address                                      |
 |-----------|  -------------------------------------------- |
-| Ethereum  |  `0xE19bC5BF58A0acbaBbFC48E65910Fa36e0a6347b` |
-| Polygon   |  `0x67B4135eb73e3a971B4fb02fd41847339D0077d6` |
-| Optimism  |  `0xB3E93afAEb136794d186b83777661886eE028d56` |
-| Binance   |  `0xf9fc85f20cf21cF4aeBd68c2d9d1FA190a568679` |
-| Arbitrum  |  `0xB06b542548Acc3cDa2dEc10084c90ddaa36730a7` |
-| Avalanche |  `0xf9fc85f20cf21cF4aeBd68c2d9d1FA190a568679` |
+| Ethereum  |  `0x8DB81239DF18AD7e64c58494060D2e701707b08D` |
+| Polygon   |  `0x8DB81239DF18AD7e64c58494060D2e701707b08D` |
+| Optimism  |  `0x8DB81239DF18AD7e64c58494060D2e701707b08D` |
+| Binance   |  `0x8DB81239DF18AD7e64c58494060D2e701707b08D` |
+| Arbitrum  |  `0x8DB81239DF18AD7e64c58494060D2e701707b08D` |
+| Avalanche |  `0x8DB81239DF18AD7e64c58494060D2e701707b08D` |
 
 Since the contract is non-upgradeable, these addresses will change when new
 versions are deployed.
@@ -40,27 +40,23 @@ Depending on the settlement token and the input token, along with the way
 in which the payer allows movement of their input token, a frontend must select
 the appropriate method by which to complete the payment. These methods are:
 
-- `completePayment`: The merchant wants a token and the payer wants to pay with the same token.
-- `completePaymentWithSwap`: The merchant wants a token and the payer wants to pay with a different token. The calldata for one of the whitelisted swap providers should be passed in.
+- `completeTransferPayment`: The merchant wants a token and the payer wants to pay with the same token.
+- `completeSwapPayment`: The merchant wants a token and the payer wants to pay with a different token. The calldata for one of the whitelisted swap providers should be passed in.
 
 ### Contract Guarantees
 
-The contract ensures that, for a given valid `TransferIntent`:
+The contract ensures that, for a given valid `Payment`:
 
 - The merchant always receives the exact amount requested
 - The merchant never receives payments past a stated deadline
 - The merchant never receives more than one payment
 - Payments may be made using the merchant's requested currency, or swapped from
   another token as part of the payment transaction
-- Unsuccessful or partial payments will never reach the merchant, thus
-  guaranteeing that payments are atomic. Either the merchant is correctly paid
-  in full and the fee is correctly charged, or the transaction reverts and no
-  state is changed onchain.
 
 
 ### Payment Transaction Results
 
-When the payment is successful, a `Payment` event is emitted by the contract
+When the payment is successful, a `PaymentCompleted` event is emitted by the contract
 with details about:
 
 - The order id for which the payment was made
