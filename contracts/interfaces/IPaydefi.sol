@@ -7,7 +7,7 @@ interface IPaydefi {
         BUY
     }
 
-    struct Payment {
+    struct TransferData {
         string orderId;
         address payInToken;
         address payOutToken;
@@ -25,9 +25,13 @@ interface IPaydefi {
         bool shouldApprove;
     }
 
-    function completeTransferPayment(Payment calldata payment) external payable;
+    function completeTransferPayment(TransferData calldata payment) external payable;
 
-    function completeSwapPayment(Payment calldata payment, SwapData calldata swapData) external payable;
+    function completeTransferDonation(TransferData calldata donation) external payable;
+
+    function completeSwapPayment(TransferData calldata payment, SwapData calldata swapData) external payable;
+
+    function completeSwapDonation(TransferData calldata donation, SwapData calldata swapData) external payable;
 
     function claimProtocolFee(address token, address receiver) external;
 

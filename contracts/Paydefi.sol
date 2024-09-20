@@ -2,13 +2,15 @@
 pragma solidity 0.8.22;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import "./interfaces/IPaydefi.sol";
 import "./libraries/PaymentErrors.sol";
 import "./libraries/ERC20Utils.sol";
 
-contract Paydefi is IPaydefi, Ownable {
+contract Paydefi is IPaydefi, Initializable, UUPSUpgradeable, OwnableUpgradeable {
     using ERC20Utils for IERC20;
 
     /// @notice mapping of swap providers
@@ -35,16 +37,46 @@ contract Paydefi is IPaydefi, Ownable {
     );
 
     /**
-     * @notice Constructor
+     * @notice Emitted when a donation is completed
+     * @param donationId donation id
+     * @param payInToken token address to pay
+     * @param payOutToken token address to receive
+     * @param payInAmount amount of payInToken
+     * @param payOutAmount amount of payOutToken
+     * @param protocolFeeAmount amount of protocol fee
+     * @param merchant merchant address
+     */
+    event DonationCompleted(
+        string donationId,
+        address payInToken,
+        address payOutToken,
+        uint256 payInAmount,
+        uint256 payOutAmount,
+        uint256 protocolFeeAmount,
+        address merchant
+    );
+
+    /**
+     * @notice Initializes the contract
      * @param initialOwner initial owner address
      * @param swapProviders array of swap providers
      */
-    constructor(address initialOwner, address[] memory swapProviders) Ownable(initialOwner) {
+    function initialize(address initialOwner, address[] memory swapProviders) initializer public {
+        __Ownable_init(initialOwner);
+        __UUPSUpgradeable_init();  
+
         for (uint256 i = 0; i < swapProviders.length; i++) {
             whitelistedSwapProviders[swapProviders[i]] = true;
         }
     }
 
+    /**
+     * @notice authorize upgrade
+     * @param newImplementation new implementation address
+     * @dev has to be an override function, since it is defined in UUPSUpgradeable
+     */
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
+    
     /**
      * @notice check if payment is expired
      * @param expiry expiry timestamp
@@ -58,18 +90,30 @@ contract Paydefi is IPaydefi, Ownable {
     }
 
     /**
+     * @notice complete direct transfer
+     * @param transferData payment or donation arguments
+     */
+    function completeDirectTransfer(
+        TransferData calldata transferData
+    ) internal whenNotExpired(transferData.expiry) returns (uint256) {
+        // transfer payInToken to contract
+        if (IERC20(transferData.payInToken).isETH(transferData.payInAmount) == 0) {
+            IERC20(transferData.payInToken).safeTransferFrom(msg.sender, address(this), transferData.payInAmount);
+        }
+
+        uint256 feeCollected = transferData.payInAmount - transferData.payOutAmount;
+
+        IERC20(transferData.payInToken).safeTransfer(transferData.merchant, transferData.payOutAmount);
+
+        return feeCollected;
+    }
+
+    /**
      * @notice complete payment with direct transfer
      * @param payment payment arguments
      */
-    function completeTransferPayment(Payment calldata payment) external payable whenNotExpired(payment.expiry) {
-        // transfer payInToken to the contract
-        if (IERC20(payment.payInToken).isETH(payment.payInAmount) == 0) {
-            IERC20(payment.payInToken).safeTransferFrom(msg.sender, address(this), payment.payInAmount);
-        }
-
-        uint256 feeCollected = payment.payInAmount - payment.payOutAmount;
-
-        IERC20(payment.payInToken).safeTransfer(payment.merchant, payment.payOutAmount);
+    function completeTransferPayment(TransferData calldata payment) external payable whenNotExpired(payment.expiry) {
+        uint256 feeCollected = completeDirectTransfer(payment);
 
         emit PaymentCompleted(
             payment.orderId,
@@ -83,33 +127,65 @@ contract Paydefi is IPaydefi, Ownable {
     }
 
     /**
+     * @notice complete donation with direct transfer
+     * @param donation donation arguments
+     */
+    function completeTransferDonation(TransferData calldata donation) external payable {
+        uint256 feeCollected = completeDirectTransfer(donation);
+
+        emit DonationCompleted(
+            donation.orderId,
+            donation.payInToken,
+            donation.payInToken,
+            donation.payInAmount,
+            donation.payOutAmount,
+            feeCollected,
+            donation.merchant
+        );
+    }
+
+    /**
+     * @notice complete swap transfer
+     * @param transferData payment or donation arguments
+     * @param swapData swap arguments
+     */
+    function completeSwapTransfer(
+        TransferData calldata transferData,
+        SwapData calldata swapData
+    ) internal whenNotExpired(transferData.expiry) returns (uint256, uint256) {
+        if (!whitelistedSwapProviders[swapData.provider]) {
+            revert PaymentErrors.SwapProviderNotWhitelisted();
+        }
+
+        (uint256 actualPayInAmount, uint256 receivedPayOutAmount) = executeSwap(transferData, swapData);
+
+        uint256 feeCollected = receivedPayOutAmount - transferData.payOutAmount;
+
+        // transfer payOutToken to merchant
+        IERC20(transferData.payOutToken).safeTransfer(transferData.merchant, transferData.payOutAmount);
+
+        // if swap is a BUY, return unused payInAmount to user
+        if (swapData.swapType == SwapType.BUY) {
+            uint256 unusedPayInAmount = transferData.payInAmount - actualPayInAmount;
+
+            if (unusedPayInAmount > 0) {
+                IERC20(transferData.payInToken).safeTransfer(msg.sender, unusedPayInAmount);
+            }
+        }
+
+        return (actualPayInAmount, feeCollected);
+    }
+
+    /**
      * @notice complete payment with swap
      * @param payment payment arguments
      * @param swapData swap arguments
      */
     function completeSwapPayment(
-        Payment calldata payment,
+        TransferData calldata payment,
         SwapData calldata swapData
     ) external payable whenNotExpired(payment.expiry) {
-        if (!whitelistedSwapProviders[swapData.provider]) {
-            revert PaymentErrors.SwapProviderNotWhitelisted();
-        }
-
-        (uint256 actualPayInAmount, uint256 receivedPayOutAmount) = executeSwap(payment, swapData);
-
-        uint256 feeCollected = receivedPayOutAmount - payment.payOutAmount;
-
-        // transfer payOutToken to merchant
-        IERC20(payment.payOutToken).safeTransfer(payment.merchant, payment.payOutAmount);
-
-        // if swap is a BUY, return unused payInAmount to user
-        if (swapData.swapType == SwapType.BUY) {
-            uint256 unusedPayInAmount = payment.payInAmount - actualPayInAmount;
-
-            if (unusedPayInAmount > 0) {
-                IERC20(payment.payInToken).safeTransfer(msg.sender, unusedPayInAmount);
-            }
-        }
+        (uint256 actualPayInAmount, uint256 feeCollected) = completeSwapTransfer(payment, swapData);
 
         emit PaymentCompleted(
             payment.orderId,
@@ -119,6 +195,25 @@ contract Paydefi is IPaydefi, Ownable {
             payment.payOutAmount,
             feeCollected,
             payment.merchant
+        );
+    }
+
+    /**
+     * @notice complete donation with swap
+     * @param donation donation arguments
+     * @param swapData swap arguments
+     */
+    function completeSwapDonation(TransferData calldata donation, SwapData calldata swapData) external payable {
+        (uint256 actualPayInAmount, uint256 feeCollected) = completeSwapTransfer(donation, swapData);
+
+        emit DonationCompleted(
+            donation.orderId,
+            donation.payInToken,
+            donation.payOutToken,
+            actualPayInAmount,
+            donation.payOutAmount,
+            feeCollected,
+            donation.merchant
         );
     }
 
@@ -170,24 +265,24 @@ contract Paydefi is IPaydefi, Ownable {
 
     /**
      * @notice execute swap
-     * @param payment payment arguments
+     * @param transferData payment or donation arguments
      * @param swapData swap arguments
      * @return spent amount of payInToken
      * @return received amount of payOutToken
      */
     function executeSwap(
-        Payment calldata payment,
+        TransferData calldata transferData,
         SwapData calldata swapData
     ) internal returns (uint256 spent, uint256 received) {
-        if (IERC20(payment.payInToken).isETH(payment.payInAmount) == 0) {
-            IERC20(payment.payInToken).safeTransferFrom(msg.sender, address(this), payment.payInAmount);
+        if (IERC20(transferData.payInToken).isETH(transferData.payInAmount) == 0) {
+            IERC20(transferData.payInToken).safeTransferFrom(msg.sender, address(this), transferData.payInAmount);
             if (swapData.shouldApprove) {
-                IERC20(payment.payInToken).approve(swapData.provider);
+                IERC20(transferData.payInToken).approve(swapData.provider);
             }
         }
 
-        uint256 payInBeforeSwap = IERC20(payment.payInToken).getBalance(address(this));
-        uint256 payOutBeforeSwap = IERC20(payment.payOutToken).getBalance(address(this));
+        uint256 payInBeforeSwap = IERC20(transferData.payInToken).getBalance(address(this));
+        uint256 payOutBeforeSwap = IERC20(transferData.payOutToken).getBalance(address(this));
 
         (bool success, ) = swapData.provider.call{value: swapData.value}(swapData.callData);
 
@@ -201,10 +296,15 @@ contract Paydefi is IPaydefi, Ownable {
             }
         }
 
-        uint256 payInAfterSwap = IERC20(payment.payInToken).getBalance(address(this));
-        uint256 payOutAfterSwap = IERC20(payment.payOutToken).getBalance(address(this));
+        uint256 payInAfterSwap = IERC20(transferData.payInToken).getBalance(address(this));
+        uint256 payOutAfterSwap = IERC20(transferData.payOutToken).getBalance(address(this));
 
         spent = payInBeforeSwap - payInAfterSwap;
         received = payOutAfterSwap - payOutBeforeSwap;
     }
+
+    /**
+     * @notice Fallback function to receive native token
+     */
+    receive() external payable {}
 }
